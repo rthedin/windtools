@@ -469,7 +469,7 @@ class StructuredSampling(object):
     def _prepare_to_read_netcdf(self):
         self.fpath = os.path.join(self.pppath, self.file)
         if not os.path.exists(self.fpath):
-            raise FileNotFoundError(f"The specified file does not exist: {filepath}")
+            raise FileNotFoundError(f"The specified file does not exist: {self.fpath}")
 
 
     def _prepare_to_read_native(self):
@@ -757,8 +757,59 @@ class StructuredSampling(object):
         return ds
 
 
-    def _read_line_sampler(self,ds):
-        raise NotImplementedError(f'Sampling `LineSampler` is not implemented. Consider implementing it..')
+    def _read_line_sampler(self,dsraw):
+
+        # Extract the coordinates array (num_points, ndim)
+        coords = dsraw["coordinates"].values
+        start = np.array(dsraw.attrs["start"])
+        end = np.array(dsraw.attrs["end"])
+        
+        # Determine alignment direction
+        deltas = np.isclose(start, end)
+        varying_axis = np.where(~deltas)[0]
+        if len(varying_axis) != 1:
+            raise ValueError(f"LineSampler not aligned with a single axis. Start={start}, End={end}, varying_axes={varying_axis}")
+        axis = varying_axis[0]
+        axis_name = ["x", "y", "z"][axis]
+        
+        # Extract coordinate values for each axis
+        xvals = np.unique(coords[:, 0])
+        yvals = np.unique(coords[:, 1])
+        zvals = np.unique(coords[:, 2])
+        
+        # Define coordinate arrays depending on which axis varies
+        coord_dict = {
+            "x": (["x"], xvals) if axis_name == "x" else (["x"], [xvals[0]]),
+            "y": (["y"], yvals) if axis_name == "y" else (["y"], [yvals[0]]),
+            "z": (["z"], zvals) if axis_name == "z" else (["z"], [zvals[0]]),
+            "samplingtimestep": (["samplingtimestep"], np.arange(1, dsraw.dims["num_time_steps"] + 1))
+        }
+        
+        # Prepare data variables
+        data_vars = {}    
+        for var in dsraw.data_vars:
+            if var == "coordinates":
+                continue
+        
+            arr = dsraw[var].values  # shape: (num_time_steps, num_points)
+            if axis_name == "x":
+                reshaped = arr.T.reshape(len(xvals), 1, 1, dsraw.dims["num_time_steps"])
+            elif axis_name == "y":
+                reshaped = arr.T.reshape(1, len(yvals), 1, dsraw.dims["num_time_steps"])
+            else:
+                reshaped = arr.T.reshape(1, 1, len(zvals), dsraw.dims["num_time_steps"])
+            data_vars[var] = (["x", "y", "z", "samplingtimestep"], reshaped)
+        
+        # Create the new Dataset with same attributes
+        dsout = xr.Dataset(data_vars=data_vars, coords=coord_dict)
+        dsout.attrs.update({
+            "source": "LineSampler reformatted",
+            "aligned_axis": axis_name,
+            "start": start.tolist(),
+            "end": end.tolist()
+        })
+
+        return dsout
 
 
     def _read_lidar_sampler(self,ds):

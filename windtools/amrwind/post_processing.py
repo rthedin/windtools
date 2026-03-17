@@ -14,6 +14,19 @@ def _read_single_group_helper(args):
     self, group, itime_i, itime_f, step, file, pptag, outputPath, simCompleted, var, verbose, package, terrain = args
     return self.read_single_group(group, itime_i, itime_f, step, file, pptag, outputPath, simCompleted, var, verbose, package, terrain)
 
+def round(arr):
+    '''
+    Automatically identifies the number of decimals for rounding
+    '''
+
+    # Compute smallest non-zero step
+    steps = np.diff(arr)
+    min_step = np.min(np.abs(steps[steps > 0]))
+
+    # Determine how many decimals are needed
+    decimals = max(0, -int(np.floor(np.log10(min_step))) )
+
+    return np.round(arr, decimals)
 
 class ABLStatistics(object):
 
@@ -172,10 +185,10 @@ class StructuredSampling(object):
         self._support_backwards_netcdf()
         
         if not os.path.exists(self.pppath):
-            raise ValueError(f"The path provided does not exist")
+            raise ValueError(f"The path {self.pppath} does not exist")
 
         if not os.path.isdir(self.pppath):
-            raise ValueError(f"The path provided is not a path")
+            raise ValueError(f"The path {self.pppath} is not a path")
 
 
     def _support_backwards_netcdf(self):
@@ -223,6 +236,21 @@ class StructuredSampling(object):
         strings, count = np.unique(basenames, return_counts=True)
         if self.pptag not in strings:
             raise ValueError(f'Requested tag {self.pptag} not available. Available tags are: {strings}.')
+
+
+    def _get_all_available_groups(self, file=None):
+        if not hasattr(self, 'file'):
+            self.file = file
+        self._prepare_to_read_netcdf()
+
+        # We can get all groups by doing
+        self.all_available_groups = list(Dataset(self.fpath).groups)
+
+
+    def _get_all_available_times(self):
+        # We can also get all the times
+        self._prepare_to_read_netcdf()
+        self.all_available_times = round(Dataset(self.fpath).variables['time'][:].tolist())
 
 
     def getGroupProperties(self, ds=None, group=None, package=None):
@@ -288,12 +316,15 @@ class StructuredSampling(object):
 
     def getGroupProperties_xr(self, ds=None, group=None):
 
+        self._get_all_available_groups()
+
         if ds is None and group is None:
             raise ValueError(f'Either `ds` or `group` must be specified')
 
         if ds is None and group is not None:
             ds = xr.open_dataset(self.fpath, group=group, engine='netcdf4')
 
+        # Get sampling type
         self.sampling_type = ds.sampling_type
 
         if 'ijk_dims' in list(ds.attrs):
@@ -333,7 +364,96 @@ class StructuredSampling(object):
         self.tdf = self.ndt-1
 
 
-    def read_single_group(self, group, itime, ftime, step=1, file=None, pptag=None, outputPath=None, simCompleted=False,
+    def read_multiple_group(self, groups=None, itime=0, ftime=-1, step=1, file=None, pptag=None, outputPath=None, simCompleted=False,
+                          var=['all'], verbose=False, package='xr', terrain=False, add_time=True):
+        '''
+        This function is tailored for virtual masts sampling using LineSampler from AMR-Wind. 
+        It assumes your dataset has varies in x, y, and z.
+
+        The expanded dataset will have coordinate name the same as the pptag given. For example, if pptag='turbvmast',
+        then the resulting dataset will have dimensional coordinate turbvmast.
+
+        Example usage
+        -------------
+        # Datasets probes
+        nTurbines = 65
+        ss = StructuredSampling('/full/path/to/post_processing')
+        dsp = ss.read_multiple_group(pptag='turbvmast', groups=[f't{t}' for t in np.arange(1,nTurbines+1)], file='turbvmast00000.nc')
+
+        '''
+        if groups is None:
+            # workaround for now. need to do better handling of the fpath
+            self._get_all_available_groups(file)
+            groups = self.all_available_groups
+            print(f'Reading all saved groups: {groups}')
+
+        coord_name = pptag
+
+        dsp = []
+        for group in groups:
+            if verbose: print(f'\rReading group {group}...', end='', flush=True)
+            ds = self.read_single_group(pptag=pptag, group=group, file=file)
+
+            # Get aux values
+            nz = ds.sizes['z']
+            x_val = ds['x'].isel(x=0).values
+            y_val = ds['y'].isel(y=0).values
+            z_val = ds['z'].values
+
+            # Add z_ind
+            ds = ds.assign_coords(z_ind=('z', np.arange(nz))).swap_dims({'z': 'z_ind'})
+
+            # Get a number from the `group` string so we can add as a mast_id
+            num = int("".join(ch for ch in group if ch.isdigit()))
+
+            # Add the current mast id
+            ds = ds.expand_dims({coord_name:[num]})
+
+            # Get rid of x and y as coordinates
+            ds = ds.squeeze(['x', 'y'], drop=True)
+
+            # Add x and y as regular variables
+            ds['x'] = ((coord_name), np.array([x_val]))
+            ds['y'] = ((coord_name), np.array([y_val]))
+
+            # Move z from coordinate to data variable
+            ds['zabs'] = ((coord_name, 'z_ind'), np.broadcast_to(z_val, (1, nz)))
+            ds = ds.reset_coords('z', drop=True)
+
+            # Add to main dataset
+            dsp.append(ds)
+
+        # Concat them all (outer if z counts differ)
+        dsp = xr.concat(dsp, dim=coord_name, join='outer')
+        # Add z AGL (just as `z` for ease of use of plotting routines)
+        dsp['z'] = dsp['zabs'] - 256
+
+
+        if verbose: print(f'\rDone reading groups {groups}.', flush=True)
+        # z (actual zagl) of all vmasts should be the same. If it is, put that one as the coordinate. If not, leave z_index as coordinate
+        if (dsp['z'] == dsp['z'].isel({coord_name:0})).all():
+            # all z are the same, as they should be (unless amrwind input set up incorrectly)
+            z_1d = dsp['z'].isel({coord_name:0})
+            dsp = dsp.drop_vars('z')
+            dsp = dsp.rename({'z_ind': 'z_ind_tmp'})
+            dsp = dsp.assign_coords(z=('z_ind_tmp', z_1d.data))
+            dsp = dsp.swap_dims({'z_ind_tmp': 'z'}).reset_coords('z_ind_tmp',drop=True)
+        else:
+            # Something is wrong. Let's print it and leave z_ind 
+            print(f'WARNING: Not all z values are the same for all met masts. Leaving the z index as coordinate.',
+                   'If this is a complex terrain case, this warning should appear. If not, check the z values.')
+
+        if add_time:
+            dsp = self._add_time(dsp)
+
+        return dsp
+
+
+
+
+
+
+    def read_single_group(self, group, itime=0, ftime=-1, step=1, file=None, pptag=None, outputPath=None, simCompleted=False,
                           var=['all'], verbose=False, package='xr', terrain=False):
         '''
         Reads a single group of data in either netcdf or native format.
@@ -730,6 +850,14 @@ class StructuredSampling(object):
 
     def read_single_group_netcdf_xr(self, group, itime=0, ftime=-1, step=1, outputPath=None, var=['velocityx','velocityy','velocityz'], simCompleted=False, verbose=False):
         
+        # We can get all groups by doing
+        self.all_available_groups = list(Dataset(self.fpath).groups)
+        if group not in self.all_available_groups:
+            raise ValueError(f'Requested group {group} not found. Available groups: {self.all_available_groups}')
+
+        # We can also get all the times
+        self.all_times = round(Dataset(self.fpath).variables['time'][:].tolist())
+
         if simCompleted:
             dsraw = xr.open_dataset(self.fpath, group=group, engine='netcdf4')
         else:
@@ -782,7 +910,7 @@ class StructuredSampling(object):
             "x": (["x"], xvals) if axis_name == "x" else (["x"], [xvals[0]]),
             "y": (["y"], yvals) if axis_name == "y" else (["y"], [yvals[0]]),
             "z": (["z"], zvals) if axis_name == "z" else (["z"], [zvals[0]]),
-            "samplingtimestep": (["samplingtimestep"], np.arange(1, dsraw.dims["num_time_steps"] + 1))
+            "samplingtimestep": (["samplingtimestep"], np.arange(1, dsraw.sizes["num_time_steps"] + 1))
         }
         
         # Prepare data variables
@@ -793,15 +921,17 @@ class StructuredSampling(object):
         
             arr = dsraw[var].values  # shape: (num_time_steps, num_points)
             if axis_name == "x":
-                reshaped = arr.T.reshape(len(xvals), 1, 1, dsraw.dims["num_time_steps"])
+                reshaped = arr.T.reshape(len(xvals), 1, 1, dsraw.sizes["num_time_steps"])
             elif axis_name == "y":
-                reshaped = arr.T.reshape(1, len(yvals), 1, dsraw.dims["num_time_steps"])
+                reshaped = arr.T.reshape(1, len(yvals), 1, dsraw.sizes["num_time_steps"])
             else:
-                reshaped = arr.T.reshape(1, 1, len(zvals), dsraw.dims["num_time_steps"])
+                reshaped = arr.T.reshape(1, 1, len(zvals), dsraw.sizes["num_time_steps"])
             data_vars[var] = (["x", "y", "z", "samplingtimestep"], reshaped)
         
         # Create the new Dataset with same attributes
         dsout = xr.Dataset(data_vars=data_vars, coords=coord_dict)
+        dsout = dsout.rename_vars({'velocityx':'u', 'velocityy':'v', 'velocityz':'w'})
+        dsout = dsout.rename_vars({k: v for k, v in {'velocityx':'u','velocityy':'v','velocityz':'w','temperature':'theta'}.items() if k in dsout})
         dsout.attrs.update({
             "source": "LineSampler reformatted",
             "aligned_axis": axis_name,
@@ -1132,6 +1262,16 @@ class StructuredSampling(object):
     def _read_probe_sampler_h5py(self, ds):
         raise NotImplementedError(f'Sampling `ProbeSampler` is not implemented for h5py. Use xarray instead.')
 
+    def _add_time(self,ds):
+
+        if not hasattr(self, 'all_times'):
+            return ds
+
+        ds = ds.rename({'samplingtimestep': 'time'})
+        ds = ds.assign_coords(time=('time', self.all_times))
+        return ds
+        
+
 
     def set_dt(self, dt):
         self.dt = dt
@@ -1271,9 +1411,6 @@ class StructuredSampling(object):
             timegiven=False
         else:
             timegiven=True
-            if dt%0.1 > 1e10:
-                # If dt has two or more significant digits, then a change in the code is required.
-                raise ValueError (f'dt with 2 significant digits requires a change in the code')
             if t0 is not None and dt is None or t0 is None and dt is not None:
                 raise ValueError (f'If specifying the time, both t0 and dt need to be given')
             if t0<=0 or dt<=0:
@@ -1311,7 +1448,7 @@ class StructuredSampling(object):
                 currentvtk = os.path.join(outputPath,f'Amb.time{time}s.vtk')
             else:
                 if timegiven:
-                    currentvtk = os.path.join(outputPath,f'Amb.time{t0+t*dt:1f}s.vtk')
+                    currentvtk = os.path.join(outputPath,f'Amb.time{t0+t*dt:.4f}s.vtk')
                 else:
                     currentvtk = os.path.join(outputPath,f'Amb.t{vtkstartind+t}.vtk')
 

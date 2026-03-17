@@ -34,10 +34,10 @@ fieldlabels_default_units = {
     'wspd': r'Wind speed [m/s]',
     'hvelmag': r'Horizontal wind speed [m/s]',
     'wdir': r'Wind direction [$^\circ$]',
-    'u': r'u [m/s]', 'Ux': r'$u$ [m/s]',
-    'v': r'v [m/s]', 'Uy': r'$v$ [m/s]',
-    'w': r'Vertical wind speed [m/s]', 'Uz': r'Vertical wind speed [m/s]',
-    'theta': r'$\theta$ [K]', 'T': r'$\theta$ [K]', 'θ': r'$\theta$ [K]',
+    'u': r'u [m/s]', 'Ux': r'$u$ [m/s]', 'velocityx': r'$u$ [m/s]',
+    'v': r'v [m/s]', 'Uy': r'$v$ [m/s]', 'velocityy': r'$v$ [m/s]',
+    'w': r'Vertical wind speed [m/s]', 'Uz': r'Vertical wind speed [m/s]', 'velocityz':r'Vertical wind speed [m/s]',
+    'theta': r'$\theta$ [K]', 'T': r'$\theta$ [K]', 'θ': r'$\theta$ [K]', 'temperature':r'$\theta$ [K]',
     'thetav': r'$\theta_v$ [K]',
     'uu': r'$\langle u^\prime u^\prime \rangle \;[\mathrm{m^2/s^2}]$',  'UUxx': r'$\langle u^\prime u^\prime \rangle \;[\mathrm{m^2/s^2}]$',
     'vv': r'$\langle v^\prime v^\prime \rangle \;[\mathrm{m^2/s^2}]$',  'UUyy': r'$\langle v^\prime v^\prime \rangle \;[\mathrm{m^2/s^2}]$',
@@ -118,7 +118,7 @@ standard_spectrumlabels = spectrumlabels_default_units
 # Supported dimensions and associated names
 dimension_names = {
     'time':      ['datetime','time','Time','t'],
-    'height':    ['height','heights','z','zagl','zstag'],
+    'height':    ['h','height','heights','z','zagl','zstag'],
     'frequency': ['frequency','freq','f',]
 }
 
